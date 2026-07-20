@@ -2,6 +2,12 @@
 
 A BepInEx mod for **Sineus Arena** that displays live powerups, pickup items, and collectibles on both the minimap and the large unfolded map overlays.
 
+## Previews
+
+| Minimap Blips | Full Map Blips |
+|---|---|
+| ![Minimap Blips](screenshots/minimapblips.png) | ![Full Map Blips](screenshots/fullmapblips.png) |
+
 ## Features
 
 - **Pulsing Colored Blips**: Clear visual indicators for different pickup types.

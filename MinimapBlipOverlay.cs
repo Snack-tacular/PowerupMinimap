@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Reflection;
 using UnityEngine;
 
 namespace PowerupMinimap
@@ -30,49 +31,69 @@ namespace PowerupMinimap
 
     /// <summary>
     /// Singleton MonoBehaviour that owns the minimap blip overlay.
-    /// It finds the game's MinimapController each scene, computes a world→minimap
-    /// projection, and draws coloured circles for every tracked pickup.
+    /// Optimised: all reflection FieldInfo is cached once; per-frame allocations are eliminated;
+    /// world bounds and canvas references are refreshed on a timer rather than every frame.
     /// </summary>
     public sealed class MinimapBlipOverlay : MonoBehaviour
     {
         public static MinimapBlipOverlay? Instance { get; private set; }
 
-        // Registry of live pickups — keyed by instance ID for fast lookup
+        // ── Registry ──────────────────────────────────────────────────────────
         private static readonly Dictionary<int, PickupEntry> _pickups = new();
         private static readonly object _lock = new object();
 
-        // ── Minimap reference cache ───────────────────────────────────────────
+        // ── Minimap references ────────────────────────────────────────────────
         private MinimapController? _minimapController;
-        private RectTransform?     _mapImageRT;        // The moving map image RectTransform
-        private RectTransform?     _maskRT;            // The visible minimap mask RectTransform
+        private RectTransform?     _mapImageRT;
+        private RectTransform?     _maskRT;
+        private Canvas?            _canvas;
+        private Camera?            _canvasCam;
 
-        // ── Blip textures ─────────────────────────────────────────────────────
-        private Texture2D? _blipTex;                   // Solid circle sprite
+        // ── Cached reflection fields (populated once per controller) ──────────
+        private FieldInfo? _fViewState;
+        private FieldInfo? _fFrameUnfolded;
+        private FieldInfo? _fCircularMask;
+        private FieldInfo? _fMinWorld;
+        private FieldInfo? _fMaxWorld;
 
-        // ── Pulse state ───────────────────────────────────────────────────────
-        private float _pulsePhase = 0f;
+        // ── Cached stable values (refreshed every N seconds) ─────────────────
+        private float  _worldMinX, _worldMinZ, _worldMaxX, _worldMaxZ;
+        private bool   _boundsValid;
+        private bool   _isCircular;
+        private float  _boundsRefreshTimer;
+        private const  float BoundsRefreshInterval = 1.0f;  // re-read game bounds once/second
+
+        // ── Per-frame draw list (reused, no alloc each frame) ─────────────────
+        private readonly List<(Vector3 world, PickupCategory cat)> _drawList = new(64);
+
+        // ── Blip texture ──────────────────────────────────────────────────────
+        private Texture2D? _blipTex;
+
+        // ── Pulse ─────────────────────────────────────────────────────────────
+        private float _pulsePhase;
 
         // ── IMGUI label style ─────────────────────────────────────────────────
         private GUIStyle? _labelStyle;
 
+        // ── Stale-entry pruning throttle ──────────────────────────────────────
+        private float _pruneTimer;
+        private const float PruneInterval = 2.0f;
+
+        // ── Remove buffer (reused) ────────────────────────────────────────────
+        private readonly List<int> _removeBuffer = new(8);
+
         // ─────────────────────────────────────────────────────────────────────
-        // Static registry helpers (called from patches on any thread)
+        // Static registry helpers
         // ─────────────────────────────────────────────────────────────────────
 
         public static void Register(int id, Transform transform, PickupCategory category)
         {
-            lock (_lock)
-            {
-                _pickups[id] = new PickupEntry { Transform = transform, Category = category };
-            }
+            lock (_lock) { _pickups[id] = new PickupEntry { Transform = transform, Category = category }; }
         }
 
         public static void Unregister(int id)
         {
-            lock (_lock)
-            {
-                _pickups.Remove(id);
-            }
+            lock (_lock) { _pickups.Remove(id); }
         }
 
         // ─────────────────────────────────────────────────────────────────────
@@ -81,14 +102,9 @@ namespace PowerupMinimap
 
         private void Awake()
         {
-            if (Instance != null && Instance != this)
-            {
-                Destroy(gameObject);
-                return;
-            }
+            if (Instance != null && Instance != this) { Destroy(gameObject); return; }
             Instance = this;
             DontDestroyOnLoad(gameObject);
-
             _blipTex = MakeCircleTexture(64);
         }
 
@@ -102,146 +118,134 @@ namespace PowerupMinimap
         {
             if (!PowerupMinimapPlugin.Enabled.Value) return;
 
-            // Refresh minimap reference every update (it might be recreated on scene load)
+            float dt = Time.deltaTime;
+
+            // Pulse animation
+            float ps = PowerupMinimapPlugin.PulseSpeed.Value;
+            if (ps > 0f) _pulsePhase = (_pulsePhase + dt * ps * Mathf.PI * 2f) % (Mathf.PI * 2f);
+
+            // Refresh minimap ref (only does work when controller is null)
             RefreshMinimapRef();
 
-            // Advance pulse animation
-            float ps = PowerupMinimapPlugin.PulseSpeed.Value;
-            if (ps > 0f) _pulsePhase = (_pulsePhase + Time.deltaTime * ps * Mathf.PI * 2f) % (Mathf.PI * 2f);
-
-            // Prune stale entries whose GameObject was destroyed
-            lock (_lock)
+            // Throttled stale-entry prune (every 2 s instead of every frame)
+            _pruneTimer += dt;
+            if (_pruneTimer >= PruneInterval)
             {
-                var toRemove = new List<int>();
-                foreach (var kv in _pickups)
-                    if (kv.Value.Transform == null) toRemove.Add(kv.Key);
-                foreach (var id in toRemove) _pickups.Remove(id);
+                _pruneTimer = 0f;
+                lock (_lock)
+                {
+                    _removeBuffer.Clear();
+                    foreach (var kv in _pickups)
+                        if (kv.Value.Transform == null) _removeBuffer.Add(kv.Key);
+                    foreach (var id in _removeBuffer) _pickups.Remove(id);
+                }
+            }
+
+            // Throttled world-bounds refresh
+            _boundsRefreshTimer += dt;
+            if (_boundsRefreshTimer >= BoundsRefreshInterval)
+            {
+                _boundsRefreshTimer = 0f;
+                _boundsValid = TryGetWorldBounds(
+                    out _worldMinX, out _worldMinZ, out _worldMaxX, out _worldMaxZ);
+
+                // Also refresh circularMask once per second (rarely changes)
+                if (_fCircularMask != null && _minimapController != null)
+                    _isCircular = (bool)_fCircularMask.GetValue(_minimapController);
             }
         }
 
         // ─────────────────────────────────────────────────────────────────────
-        // IMGUI rendering — draws directly on top of the minimap widget
+        // IMGUI rendering
         // ─────────────────────────────────────────────────────────────────────
 
         private void OnGUI()
         {
             if (!PowerupMinimapPlugin.Enabled.Value) return;
             if (_mapImageRT == null || _blipTex == null) return;
+            if (!_boundsValid) return;
 
-            // Determine active view state and mask RectTransform
+            float worldW = _worldMaxX - _worldMinX;
+            float worldH = _worldMaxZ - _worldMinZ;
+            if (worldW < 0.001f || worldH < 0.001f) return;
+
+            // Determine the active mask (folded vs unfolded) using cached field references
             RectTransform? activeMaskRT = _maskRT;
-            bool isCircular = false;
+            bool isCircular = _isCircular;
 
-            if (_minimapController != null)
+            if (_fViewState != null && _minimapController != null)
             {
-                var t = _minimapController.GetType();
-                var fState = HarmonyLib.AccessTools.Field(t, "_viewState");
-                string stateStr = fState?.GetValue(_minimapController)?.ToString() ?? "";
-
-                if (stateStr == "Unfolded")
+                string stateStr = _fViewState.GetValue(_minimapController)?.ToString() ?? "";
+                if (stateStr == "Unfolded" && _fFrameUnfolded != null)
                 {
-                    var fFrameUnfolded = HarmonyLib.AccessTools.Field(t, "frameUnfolded");
-                    if (fFrameUnfolded != null)
+                    var goUnfolded = _fFrameUnfolded.GetValue(_minimapController) as GameObject;
+                    if (goUnfolded != null && goUnfolded.activeInHierarchy)
                     {
-                        var goUnfolded = fFrameUnfolded.GetValue(_minimapController) as GameObject;
-                        if (goUnfolded != null && goUnfolded.activeInHierarchy)
-                        {
-                            var rtUnfolded = goUnfolded.GetComponent<RectTransform>();
-                            if (rtUnfolded != null) activeMaskRT = rtUnfolded;
-                        }
-                    }
-                }
-                else
-                {
-                    // Only apply circular mask if not unfolded
-                    var fCirc = HarmonyLib.AccessTools.Field(t, "circularMask");
-                    if (fCirc != null)
-                    {
-                        isCircular = (bool)fCirc.GetValue(_minimapController);
+                        var rtU = goUnfolded.GetComponent<RectTransform>();
+                        if (rtU != null) { activeMaskRT = rtU; isCircular = false; }
                     }
                 }
             }
 
             if (activeMaskRT == null) return;
 
-            // Calculate GUI rect of the active minimap mask window
             Rect maskRect = GUIRectOf(activeMaskRT);
             if (maskRect.width < 1f || maskRect.height < 1f) return;
 
-            // Collect positions
-            List<(Vector3 world, PickupCategory cat)> entries;
-            lock (_lock)
-            {
-                entries = new List<(Vector3, PickupCategory)>(_pickups.Count);
-                foreach (var kv in _pickups)
-                {
-                    if (kv.Value.Transform == null) continue;
-                    entries.Add((kv.Value.Transform.position, kv.Value.Category));
-                }
-            }
-
-            if (entries.Count == 0) return;
-
-            // We need world→minimap bounds. Get them from the MinimapController.
-            if (!TryGetWorldBounds(out float worldMinX, out float worldMinZ, out float worldMaxX, out float worldMaxZ))
-                return;
-
-            float worldW = worldMaxX - worldMinX;
-            float worldH = worldMaxZ - worldMinZ;
-            if (worldW < 0.001f || worldH < 0.001f) return;
-
-            // Compute pulse multiplier
-            float pulse = 1f + Mathf.Sin(_pulsePhase) * PowerupMinimapPlugin.PulseScale.Value;
+            // Pulse scale
+            float pulse    = 1f + Mathf.Sin(_pulsePhase) * PowerupMinimapPlugin.PulseScale.Value;
             float baseSize = PowerupMinimapPlugin.BlipSize.Value * pulse;
 
             if (_labelStyle == null) BuildLabelStyle();
 
-            // Get the camera of the canvas so we can project to screen space correctly
-            Canvas canvas = _mapImageRT.GetComponentInParent<Canvas>();
-            Camera cam = (canvas != null) ? canvas.worldCamera : null;
+            // Snapshot pickups — reuse list, no heap alloc each frame
+            _drawList.Clear();
+            lock (_lock)
+            {
+                foreach (var kv in _pickups)
+                {
+                    if (kv.Value.Transform == null) continue;
+                    _drawList.Add((kv.Value.Transform.position, kv.Value.Category));
+                }
+            }
+
+            if (_drawList.Count == 0) return;
+
+            // Precompute circle-clip constants
+            float circR2 = 0f;
+            float circCX = maskRect.width  * 0.5f;
+            float circCY = maskRect.height * 0.5f;
+            if (isCircular) circR2 = circCX * circCX; // r = half-width
 
             GUI.BeginClip(maskRect);
 
-            foreach (var (worldPos, cat) in entries)
+            foreach (var (worldPos, cat) in _drawList)
             {
                 if (!IsVisible(cat)) continue;
 
-                // 1. Map world coordinates to UV on the scrollable map image
-                float u = (worldPos.x - worldMinX) / worldW;
-                float v = (worldPos.z - worldMinZ) / worldH;
+                float u = (worldPos.x - _worldMinX) / worldW;
+                float v = (worldPos.z - _worldMinZ) / worldH;
 
-                // 2. Map UV to local coordinates of the scrollable map image
                 float localX = (u - _mapImageRT.pivot.x) * _mapImageRT.rect.width;
                 float localY = (v - _mapImageRT.pivot.y) * _mapImageRT.rect.height;
 
-                // 3. Convert local coordinates to UI world space (canvas space)
-                Vector3 uiWorldPoint = _mapImageRT.TransformPoint(new Vector3(localX, localY, 0f));
+                Vector3 uiWorld  = _mapImageRT.TransformPoint(new Vector3(localX, localY, 0f));
+                Vector2 screen   = RectTransformUtility.WorldToScreenPoint(_canvasCam, uiWorld);
 
-                // 4. Convert UI world space to screen space (pixels)
-                Vector2 screenPos = RectTransformUtility.WorldToScreenPoint(cam, uiWorldPoint);
+                float px = screen.x - maskRect.xMin;
+                float py = (Screen.height - screen.y) - maskRect.yMin;
 
-                // 5. Convert screen space to IMGUI-clip local space
-                // IMGUI is Y-down, screenPos is Y-up
-                float px = screenPos.x - maskRect.xMin;
-                float py = (Screen.height - screenPos.y) - maskRect.yMin;
-
-                // If circular mask is enabled, discard blips outside the circle radius
                 if (isCircular)
                 {
-                    float dx = px - maskRect.width * 0.5f;
-                    float dy = py - maskRect.height * 0.5f;
-                    float r = maskRect.width * 0.5f;
-                    if (dx * dx + dy * dy > r * r) continue;
+                    float dx = px - circCX, dy = py - circCY;
+                    if (dx * dx + dy * dy > circR2) continue;
                 }
                 else
                 {
-                    // For square/rectangular mask, manually clip to ensure they don't draw outside clip bounds
-                    if (px < 0f || px > maskRect.width || py < 0f || py > maskRect.height)
-                        continue;
+                    if (px < 0f || px > maskRect.width || py < 0f || py > maskRect.height) continue;
                 }
 
-                Color col = GetColor(cat);
-                DrawBlip(px, py, baseSize, col, cat);
+                DrawBlip(px, py, baseSize, GetColor(cat), cat);
             }
 
             GUI.EndClip();
@@ -256,47 +260,60 @@ namespace PowerupMinimap
             if (_minimapController == null)
             {
                 _minimapController = UnityEngine.Object.FindAnyObjectByType<MinimapController>();
-                _mapImageRT = null;
-                _maskRT = null;
-            }
+                if (_minimapController == null) return;
 
-            if (_minimapController == null) return;
+                // Cache all FieldInfo objects once
+                var t = _minimapController.GetType();
+                _fViewState     = HarmonyLib.AccessTools.Field(t, "_viewState");
+                _fFrameUnfolded = HarmonyLib.AccessTools.Field(t, "frameUnfolded");
+                _fCircularMask  = HarmonyLib.AccessTools.Field(t, "circularMask");
+                _fMinWorld      = HarmonyLib.AccessTools.Field(t, "_minWorld");
+                _fMaxWorld      = HarmonyLib.AccessTools.Field(t, "_maxWorld");
+
+                // Reset RTs so they get re-resolved below
+                _mapImageRT = null;
+                _maskRT     = null;
+                _canvas     = null;
+                _canvasCam  = null;
+
+                // Force an immediate bounds refresh
+                _boundsRefreshTimer = BoundsRefreshInterval;
+            }
 
             if (_mapImageRT == null || _maskRT == null)
             {
-                var t = _minimapController.GetType();
-                var fMap = HarmonyLib.AccessTools.Field(t, "mapImageRect");
-                if (fMap != null) _mapImageRT = fMap.GetValue(_minimapController) as RectTransform;
-
+                var t    = _minimapController.GetType();
+                var fMap  = HarmonyLib.AccessTools.Field(t, "mapImageRect");
                 var fMask = HarmonyLib.AccessTools.Field(t, "maskRect");
-                if (fMask != null) _maskRT = fMask.GetValue(_minimapController) as RectTransform;
 
-                // Fallbacks
+                if (fMap  != null) _mapImageRT = fMap.GetValue(_minimapController)  as RectTransform;
+                if (fMask != null) _maskRT     = fMask.GetValue(_minimapController) as RectTransform;
+
                 if (_mapImageRT == null) _mapImageRT = FindMinimapRect(_minimapController);
-                if (_maskRT == null) _maskRT = _minimapController.GetComponent<RectTransform>();
+                if (_maskRT     == null) _maskRT     = _minimapController.GetComponent<RectTransform>();
+            }
+
+            // Cache Canvas / camera once
+            if (_canvas == null && _mapImageRT != null)
+            {
+                _canvas    = _mapImageRT.GetComponentInParent<Canvas>();
+                _canvasCam = (_canvas != null) ? _canvas.worldCamera : null;
             }
         }
 
         private static RectTransform? FindMinimapRect(MinimapController ctrl)
         {
-            // Walk the hierarchy looking for the actual map image panel
             foreach (var name in new[] { "MinimapImage", "MapImage", "Minimap", "Map", "MinimapPanel" })
             {
                 var t = ctrl.transform.Find(name);
-                if (t != null)
-                {
-                    var rt = t.GetComponent<RectTransform>();
-                    if (rt != null) return rt;
-                }
+                if (t != null) { var rt = t.GetComponent<RectTransform>(); if (rt != null) return rt; }
             }
-            // Fall back to the controller's own RT (or first child)
-            var selfRt = ctrl.GetComponent<RectTransform>();
-            if (selfRt != null) return selfRt;
-
+            var self = ctrl.GetComponent<RectTransform>();
+            if (self != null) return self;
             if (ctrl.transform.childCount > 0)
             {
-                var childRt = ctrl.transform.GetChild(0).GetComponent<RectTransform>();
-                if (childRt != null) return childRt;
+                var child = ctrl.transform.GetChild(0).GetComponent<RectTransform>();
+                if (child != null) return child;
             }
             return null;
         }
@@ -305,71 +322,19 @@ namespace PowerupMinimap
         {
             minX = minZ = maxX = maxZ = 0f;
 
-            if (_minimapController != null)
+            if (_minimapController != null && _fMinWorld != null && _fMaxWorld != null)
             {
-                var ctrl = _minimapController;
-                var t = ctrl.GetType();
-
-                // Strategy 1: Use game's own _minWorld and _maxWorld fields
-                var fMin = HarmonyLib.AccessTools.Field(t, "_minWorld");
-                var fMax = HarmonyLib.AccessTools.Field(t, "_maxWorld");
-                if (fMin != null && fMax != null)
+                var minV = _fMinWorld.GetValue(_minimapController);
+                var maxV = _fMaxWorld.GetValue(_minimapController);
+                if (minV is Vector2 mn && maxV is Vector2 mx && Mathf.Abs(mx.x - mn.x) > 1f)
                 {
-                    var minV = fMin.GetValue(ctrl);
-                    var maxV = fMax.GetValue(ctrl);
-                    if (minV is Vector2 min2 && maxV is Vector2 max2 && Mathf.Abs(max2.x - min2.x) > 1f)
-                    {
-                        minX = min2.x;
-                        minZ = min2.y; // Vector2.y maps to World Z
-                        maxX = max2.x;
-                        maxZ = max2.y; // Vector2.y maps to World Z
-                        return true;
-                    }
-                }
-
-                // Look for common field names
-                foreach (var fname in new[] { "worldBounds", "mapBounds", "bounds", "_bounds", "WorldBounds", "MapBounds" })
-                {
-                    var f = HarmonyLib.AccessTools.Field(t, fname);
-                    if (f != null)
-                    {
-                        object val = f.GetValue(ctrl);
-                        if (val is Bounds b && b.size.magnitude > 0.1f)
-                        {
-                            minX = b.min.x; minZ = b.min.z;
-                            maxX = b.max.x; maxZ = b.max.z;
-                            return true;
-                        }
-                        if (val is Rect r && r.width > 0.1f)
-                        {
-                            minX = r.xMin; minZ = r.yMin;
-                            maxX = r.xMax; maxZ = r.yMax;
-                            return true;
-                        }
-                    }
-                }
-
-                // Look for a minimap camera and derive from its orthographic size
-                foreach (var fname in new[] { "minimapCamera", "_minimapCamera", "mapCamera", "_camera", "Camera" })
-                {
-                    var f = HarmonyLib.AccessTools.Field(t, fname);
-                    if (f == null) continue;
-                    var cam = f.GetValue(ctrl) as Camera;
-                    if (cam != null && cam.orthographic)
-                    {
-                        float s = cam.orthographicSize;
-                        Vector3 p = cam.transform.position;
-                        float aspect = cam.aspect > 0f ? cam.aspect : 1f;
-                        minX = p.x - s * aspect;
-                        maxX = p.x + s * aspect;
-                        minZ = p.z - s;
-                        maxZ = p.z + s;
-                        return true;
-                    }
+                    minX = mn.x; minZ = mn.y;
+                    maxX = mx.x; maxZ = mx.y;
+                    return true;
                 }
             }
 
-            // Strategy 2: use all terrain bounds
+            // Terrain fallback
             var terrains = UnityEngine.Object.FindObjectsByType<Terrain>(FindObjectsInactive.Exclude);
             if (terrains != null && terrains.Length > 0)
             {
@@ -380,15 +345,13 @@ namespace PowerupMinimap
                     if (ter == null || ter.terrainData == null) continue;
                     Vector3 tp = ter.transform.position;
                     Vector3 ts = ter.terrainData.size;
-                    minX = Mathf.Min(minX, tp.x);
-                    minZ = Mathf.Min(minZ, tp.z);
-                    maxX = Mathf.Max(maxX, tp.x + ts.x);
-                    maxZ = Mathf.Max(maxZ, tp.z + ts.z);
+                    minX = Mathf.Min(minX, tp.x); minZ = Mathf.Min(minZ, tp.z);
+                    maxX = Mathf.Max(maxX, tp.x + ts.x); maxZ = Mathf.Max(maxZ, tp.z + ts.z);
                 }
                 if (maxX > minX && maxZ > minZ) return true;
             }
 
-            // Strategy 3: derive bounds from all known pickup positions + a generous pad
+            // Pickup-position fallback
             lock (_lock)
             {
                 if (_pickups.Count == 0) return false;
@@ -398,14 +361,11 @@ namespace PowerupMinimap
                 {
                     if (kv.Value.Transform == null) continue;
                     Vector3 p = kv.Value.Transform.position;
-                    minX = Mathf.Min(minX, p.x);
-                    minZ = Mathf.Min(minZ, p.z);
-                    maxX = Mathf.Max(maxX, p.x);
-                    maxZ = Mathf.Max(maxZ, p.z);
+                    minX = Mathf.Min(minX, p.x); minZ = Mathf.Min(minZ, p.z);
+                    maxX = Mathf.Max(maxX, p.x); maxZ = Mathf.Max(maxZ, p.z);
                 }
                 float pad = 50f;
-                minX -= pad; minZ -= pad;
-                maxX += pad; maxZ += pad;
+                minX -= pad; minZ -= pad; maxX += pad; maxZ += pad;
                 return maxX > minX && maxZ > minZ;
             }
         }
@@ -413,25 +373,22 @@ namespace PowerupMinimap
         private void DrawBlip(float cx, float cy, float size, Color col, PickupCategory cat)
         {
             float r = size * 0.5f;
-            var rect = new Rect(cx - r, cy - r, size, size);
 
-            // Outer glow (larger, more transparent)
-            Color glow = col;
-            glow.a *= 0.35f;
+            // Outer glow
+            Color glow = col; glow.a *= 0.35f;
             GUI.color = glow;
             GUI.DrawTexture(new Rect(cx - r * 1.8f, cy - r * 1.8f, size * 1.8f, size * 1.8f), _blipTex!);
 
-            // Inner filled circle
+            // Inner circle
             GUI.color = col;
-            GUI.DrawTexture(rect, _blipTex!);
+            GUI.DrawTexture(new Rect(cx - r, cy - r, size, size), _blipTex!);
 
-            // Category letter label
+            // Letter label
             if (_labelStyle != null && size >= 6f)
             {
                 GUI.color = Color.white;
-                string letter = CategoryLetter(cat);
                 _labelStyle.fontSize = Mathf.RoundToInt(size * 0.7f);
-                GUI.Label(new Rect(cx - r, cy - r, size, size), letter, _labelStyle);
+                GUI.Label(new Rect(cx - r, cy - r, size, size), CategoryLetter(cat), _labelStyle);
             }
 
             GUI.color = Color.white;
@@ -473,46 +430,32 @@ namespace PowerupMinimap
             _                       => PowerupMinimapPlugin.ShowGeneric.Value,
         };
 
-        // Convert a RectTransform to a screen-space Rect for IMGUI use.
         private static Rect GUIRectOf(RectTransform rt)
         {
-            Canvas canvas = rt.GetComponentInParent<Canvas>();
-            Camera cam = (canvas != null) ? canvas.worldCamera : null;
+            // NOTE: canvas / camera are cached in _canvasCam; this helper is called
+            // only once per OnGUI so we just fetch from the RT itself here.
+            Canvas? c = rt.GetComponentInParent<Canvas>();
+            Camera? cam = c?.worldCamera;
 
             Vector3[] corners = new Vector3[4];
             rt.GetWorldCorners(corners);
+            Vector2 s0 = RectTransformUtility.WorldToScreenPoint(cam, corners[0]);
+            Vector2 s2 = RectTransformUtility.WorldToScreenPoint(cam, corners[2]);
 
-            Vector2 screen0 = RectTransformUtility.WorldToScreenPoint(cam, corners[0]);
-            Vector2 screen2 = RectTransformUtility.WorldToScreenPoint(cam, corners[2]);
-
-            float xMin = screen0.x;
-            float yMin = screen0.y;
-            float xMax = screen2.x;
-            float yMax = screen2.y;
-
-            // Unity GUI is top-left origin; screen is bottom-left
-            float guiY = Screen.height - yMax;
-            return new Rect(xMin, guiY, xMax - xMin, yMax - yMin);
+            return new Rect(s0.x, Screen.height - s2.y, s2.x - s0.x, s2.y - s0.y);
         }
 
-        // Build a circular texture for the blip sprite
         private static Texture2D MakeCircleTexture(int size)
         {
-            var tex = new Texture2D(size, size, TextureFormat.RGBA32, false);
+            var tex  = new Texture2D(size, size, TextureFormat.RGBA32, false);
             tex.hideFlags = HideFlags.HideAndDontSave;
-            float half = size * 0.5f;
-            float r = half - 1f;
+            float half = size * 0.5f, r = half - 1f;
             for (int y = 0; y < size; y++)
-            {
                 for (int x = 0; x < size; x++)
                 {
-                    float dx = x - half + 0.5f;
-                    float dy = y - half + 0.5f;
-                    float dist = Mathf.Sqrt(dx * dx + dy * dy);
-                    float alpha = Mathf.Clamp01((r - dist) / 1.5f);
-                    tex.SetPixel(x, y, new Color(1f, 1f, 1f, alpha));
+                    float dx = x - half + 0.5f, dy = y - half + 0.5f;
+                    tex.SetPixel(x, y, new Color(1f, 1f, 1f, Mathf.Clamp01((r - Mathf.Sqrt(dx*dx+dy*dy)) / 1.5f)));
                 }
-            }
             tex.Apply();
             return tex;
         }

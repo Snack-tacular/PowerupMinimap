@@ -144,9 +144,37 @@ namespace PowerupMinimap
         private static Color ParseColor(string hex, Color fallback)
         {
             if (string.IsNullOrWhiteSpace(hex)) return fallback;
-            if (!hex.StartsWith("#")) hex = "#" + hex;
-            if (ColorUtility.TryParseHtmlString(hex, out Color color))
-                return color;
+            hex = hex.Trim().TrimStart('#');
+
+            try
+            {
+                if (hex.Length == 6)
+                {
+                    byte r = byte.Parse(hex.Substring(0, 2), System.Globalization.NumberStyles.HexNumber);
+                    byte g = byte.Parse(hex.Substring(2, 2), System.Globalization.NumberStyles.HexNumber);
+                    byte b = byte.Parse(hex.Substring(4, 2), System.Globalization.NumberStyles.HexNumber);
+                    return new Color(r / 255f, g / 255f, b / 255f, 1f);
+                }
+                if (hex.Length == 8)
+                {
+                    byte r = byte.Parse(hex.Substring(0, 2), System.Globalization.NumberStyles.HexNumber);
+                    byte g = byte.Parse(hex.Substring(2, 2), System.Globalization.NumberStyles.HexNumber);
+                    byte b = byte.Parse(hex.Substring(4, 2), System.Globalization.NumberStyles.HexNumber);
+                    byte a = byte.Parse(hex.Substring(6, 2), System.Globalization.NumberStyles.HexNumber);
+                    return new Color(r / 255f, g / 255f, b / 255f, a / 255f);
+                }
+                if (hex.Length == 3)
+                {
+                    byte r = byte.Parse(new string(hex[0], 2), System.Globalization.NumberStyles.HexNumber);
+                    byte g = byte.Parse(new string(hex[1], 2), System.Globalization.NumberStyles.HexNumber);
+                    byte b = byte.Parse(new string(hex[2], 2), System.Globalization.NumberStyles.HexNumber);
+                    return new Color(r / 255f, g / 255f, b / 255f, 1f);
+                }
+            }
+            catch
+            {
+            }
+
             return fallback;
         }
     }

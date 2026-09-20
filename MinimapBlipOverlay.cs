@@ -415,14 +415,14 @@ namespace PowerupMinimap
 
         private static Color GetColor(PickupCategory cat) => cat switch
         {
-            PickupCategory.HP       => PowerupMinimapPlugin.ColorHP.Value,
-            PickupCategory.Buff     => PowerupMinimapPlugin.ColorBuff.Value,
-            PickupCategory.Bomb     => PowerupMinimapPlugin.ColorBomb.Value,
-            PickupCategory.Magnet   => PowerupMinimapPlugin.ColorMagnet.Value,
-            PickupCategory.ExpBoost => PowerupMinimapPlugin.ColorExpBoost.Value,
-            PickupCategory.Speed    => PowerupMinimapPlugin.ColorSpeed.Value,
-            PickupCategory.Chest    => PowerupMinimapPlugin.ColorChest.Value,
-            _                       => PowerupMinimapPlugin.ColorGeneric.Value,
+            PickupCategory.HP       => PowerupMinimapPlugin.ParsedColorHP,
+            PickupCategory.Buff     => PowerupMinimapPlugin.ParsedColorBuff,
+            PickupCategory.Bomb     => PowerupMinimapPlugin.ParsedColorBomb,
+            PickupCategory.Magnet   => PowerupMinimapPlugin.ParsedColorMagnet,
+            PickupCategory.ExpBoost => PowerupMinimapPlugin.ParsedColorExpBoost,
+            PickupCategory.Speed    => PowerupMinimapPlugin.ParsedColorSpeed,
+            PickupCategory.Chest    => PowerupMinimapPlugin.ParsedColorChest,
+            _                       => PowerupMinimapPlugin.ParsedColorGeneric,
         };
 
         private static bool IsVisible(PickupCategory cat) => cat switch

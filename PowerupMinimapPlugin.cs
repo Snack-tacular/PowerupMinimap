@@ -1,16 +1,19 @@
+using System;
 using BepInEx;
 using BepInEx.Configuration;
 using BepInEx.Logging;
+using BepInEx.Unity.IL2CPP;
 using HarmonyLib;
+using Il2CppInterop.Runtime.Injection;
 using UnityEngine;
 
 namespace PowerupMinimap
 {
     [BepInPlugin(MyPluginInfo.PLUGIN_GUID, MyPluginInfo.PLUGIN_NAME, MyPluginInfo.PLUGIN_VERSION)]
-    public class PowerupMinimapPlugin : BaseUnityPlugin
+    public class PowerupMinimapPlugin : BasePlugin
     {
         public static PowerupMinimapPlugin Instance { get; private set; } = null!;
-        internal static ManualLogSource Log { get; private set; } = null!;
+        public new static ManualLogSource Log { get; private set; } = null!;
 
         // ── Config ────────────────────────────────────────────────────────────
         public static ConfigEntry<bool>  Enabled          { get; private set; } = null!;
@@ -38,53 +41,48 @@ namespace PowerupMinimap
         public static ConfigEntry<bool>  ShowChest        { get; private set; } = null!;
         public static ConfigEntry<bool>  ShowGeneric      { get; private set; } = null!;
 
-        private Harmony _harmony = null!;
+        private Harmony? _harmony;
 
-        private void Awake()
+        public override void Load()
         {
             Instance = this;
-            Log = base.Logger;
+            Log = base.Log;
 
             BindConfig();
 
-            _harmony = new Harmony(MyPluginInfo.PLUGIN_GUID);
-            _harmony.PatchAll(typeof(CollectiblePatches));
-
-            UnityEngine.SceneManagement.SceneManager.sceneLoaded += OnSceneLoaded;
-
-            Log.LogInfo("Powerup Minimap loaded successfully!");
-        }
-
-        private void OnSceneLoaded(UnityEngine.SceneManagement.Scene scene, UnityEngine.SceneManagement.LoadSceneMode mode)
-        {
             try
             {
-                // Ensure overlay is initialized when a scene loads
-                var go = GameObject.Find("PowerupMinimapOverlay");
-                if (go == null)
-                {
-                    go = new GameObject("PowerupMinimapOverlay");
-                    go.AddComponent<MinimapBlipOverlay>();
-                }
+                // Register custom MonoBehaviour with IL2CPP runtime
+                ClassInjector.RegisterTypeInIl2Cpp<MinimapBlipOverlay>();
+
+                _harmony = new Harmony(MyPluginInfo.PLUGIN_GUID);
+                _harmony.PatchAll(typeof(CollectiblePatches));
+
+                // Instantiate persistent overlay GameObject
+                var go = new GameObject("PowerupMinimapOverlay");
+                UnityEngine.Object.DontDestroyOnLoad(go);
+                go.AddComponent<MinimapBlipOverlay>();
+
+                Log.LogInfo("Powerup Minimap (IL2CPP) loaded successfully!");
             }
-            catch (System.Exception ex)
+            catch (Exception ex)
             {
-                Log.LogError($"Error in OnSceneLoaded: {ex}");
+                Log.LogError("Failed to initialize Powerup Minimap: " + ex);
             }
         }
 
-        private void OnDestroy()
+        public override bool Unload()
         {
-            UnityEngine.SceneManagement.SceneManager.sceneLoaded -= OnSceneLoaded;
-            _harmony.UnpatchSelf();
+            _harmony?.UnpatchSelf();
+            return base.Unload();
         }
 
         private void BindConfig()
         {
-            const string sGeneral  = "1 - General";
+            const string sGeneral    = "1 - General";
             const string sAppearance = "2 - Appearance";
-            const string sColors   = "3 - Colors";
-            const string sFilters  = "4 - Filters";
+            const string sColors     = "3 - Colors";
+            const string sFilters    = "4 - Filters";
 
             Enabled       = Config.Bind(sGeneral,    "Enabled",     true,  "Enable or disable the entire mod.");
             BlipSize      = Config.Bind(sAppearance, "BlipSize",    8f,    "Radius in minimap pixels of each powerup blip.");
@@ -106,9 +104,8 @@ namespace PowerupMinimap
             ShowMagnet    = Config.Bind(sFilters, "ShowMagnet",   true, "Show magnet pickups on the minimap.");
             ShowExpBoost  = Config.Bind(sFilters, "ShowExpBoost", true, "Show experience boost pickups on the minimap.");
             ShowSpeed     = Config.Bind(sFilters, "ShowSpeed",    true, "Show speed buff pickups on the minimap.");
-            ShowChest     = Config.Bind(sFilters, "ShowChest",    true, "Show buff chests on the minimap.");
+            ShowChest     = Config.Bind(sFilters, "ShowChest",    false, "Show buff chests on the minimap (default false as game has native icon).");
             ShowGeneric   = Config.Bind(sFilters, "ShowGeneric",  true, "Show all other pickup types on the minimap.");
         }
-
     }
 }

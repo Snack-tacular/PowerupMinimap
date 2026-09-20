@@ -1,82 +1,38 @@
 <Project Sdk="Microsoft.NET.Sdk">
-
   <PropertyGroup>
-    <TargetFramework>netstandard2.1</TargetFramework>
+    <TargetFramework>net6.0</TargetFramework>
+    <Nullable>enable</Nullable>
     <AssemblyName>PowerupMinimap</AssemblyName>
     <RootNamespace>PowerupMinimap</RootNamespace>
-    <Nullable>enable</Nullable>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <LangVersion>latest</LangVersion>
-    <Optimize>true</Optimize>
-    <Deterministic>true</Deterministic>
+
+    <BepInCore>C:\Program Files (x86)\Steam\steamapps\common\Sineus Arena\BepInEx\core</BepInCore>
+    <BepInInterop>C:\Program Files (x86)\Steam\steamapps\common\Sineus Arena\BepInEx\interop</BepInInterop>
   </PropertyGroup>
 
   <ItemGroup>
-    <!-- BepInEx core -->
-    <Reference Include="BepInEx">
-      <HintPath>C:\Program Files (x86)\Steam\steamapps\common\Sineus Arena\BepInEx\core\BepInEx.dll</HintPath>
-      <Private>false</Private>
-    </Reference>
-    <Reference Include="0Harmony">
-      <HintPath>C:\Program Files (x86)\Steam\steamapps\common\Sineus Arena\BepInEx\core\0Harmony.dll</HintPath>
-      <Private>false</Private>
-    </Reference>
+    <!-- BepInEx 6 IL2CPP Core Assemblies -->
+    <Reference Include="BepInEx.Core" HintPath="$(BepInCore)\BepInEx.Core.dll" Private="false" />
+    <Reference Include="BepInEx.Unity.IL2CPP" HintPath="$(BepInCore)\BepInEx.Unity.IL2CPP.dll" Private="false" />
+    <Reference Include="Il2CppInterop.Runtime" HintPath="$(BepInCore)\Il2CppInterop.Runtime.dll" Private="false" />
+    <Reference Include="0Harmony" HintPath="$(BepInCore)\0Harmony.dll" Private="false" />
 
-    <!-- Unity engine assemblies -->
-    <Reference Include="UnityEngine">
-      <HintPath>C:\Program Files (x86)\Steam\steamapps\common\Sineus Arena\SineusArena_Data\Managed\UnityEngine.dll</HintPath>
-      <Private>false</Private>
-    </Reference>
-    <Reference Include="UnityEngine.CoreModule">
-      <HintPath>C:\Program Files (x86)\Steam\steamapps\common\Sineus Arena\SineusArena_Data\Managed\UnityEngine.CoreModule.dll</HintPath>
-      <Private>false</Private>
-    </Reference>
-    <Reference Include="UnityEngine.IMGUIModule">
-      <HintPath>C:\Program Files (x86)\Steam\steamapps\common\Sineus Arena\SineusArena_Data\Managed\UnityEngine.IMGUIModule.dll</HintPath>
-      <Private>false</Private>
-    </Reference>
-    <Reference Include="UnityEngine.UI">
-      <HintPath>C:\Program Files (x86)\Steam\steamapps\common\Sineus Arena\SineusArena_Data\Managed\UnityEngine.UI.dll</HintPath>
-      <Private>false</Private>
-    </Reference>
-    <Reference Include="UnityEngine.UIModule">
-      <HintPath>C:\Program Files (x86)\Steam\steamapps\common\Sineus Arena\SineusArena_Data\Managed\UnityEngine.UIModule.dll</HintPath>
-      <Private>false</Private>
-    </Reference>
-    <Reference Include="UnityEngine.TextRenderingModule">
-      <HintPath>C:\Program Files (x86)\Steam\steamapps\common\Sineus Arena\SineusArena_Data\Managed\UnityEngine.TextRenderingModule.dll</HintPath>
-      <Private>false</Private>
-    </Reference>
-    <Reference Include="UnityEngine.AnimationModule">
-      <HintPath>C:\Program Files (x86)\Steam\steamapps\common\Sineus Arena\SineusArena_Data\Managed\UnityEngine.AnimationModule.dll</HintPath>
-      <Private>false</Private>
-    </Reference>
-    <Reference Include="UnityEngine.TerrainModule">
-      <HintPath>C:\Program Files (x86)\Steam\steamapps\common\Sineus Arena\SineusArena_Data\Managed\UnityEngine.TerrainModule.dll</HintPath>
-      <Private>false</Private>
-    </Reference>
-    <Reference Include="UnityEngine.PhysicsModule">
-      <HintPath>C:\Program Files (x86)\Steam\steamapps\common\Sineus Arena\SineusArena_Data\Managed\UnityEngine.PhysicsModule.dll</HintPath>
-      <Private>false</Private>
-    </Reference>
+    <!-- Essential IL2CPP Core System References -->
+    <Reference Include="Il2Cppmscorlib" HintPath="$(BepInInterop)\Il2Cppmscorlib.dll" Private="false" />
+    <Reference Include="Il2CppSystem" HintPath="$(BepInInterop)\Il2CppSystem.dll" Private="false" />
 
-    <!-- Game assembly -->
-    <Reference Include="Assembly-CSharp">
-      <HintPath>C:\Program Files (x86)\Steam\steamapps\common\Sineus Arena\SineusArena_Data\Managed\Assembly-CSharp.dll</HintPath>
-      <Private>false</Private>
-    </Reference>
+    <!-- Unstripped / Generated Game Interop Assemblies -->
+    <Reference Include="Assembly-CSharp" HintPath="$(BepInInterop)\Assembly-CSharp.dll" Private="false" />
+    <Reference Include="Unity.Netcode.Runtime" HintPath="$(BepInInterop)\Unity.Netcode.Runtime.dll" Private="false" />
 
-    <!-- TextMeshPro -->
-    <Reference Include="Unity.TextMeshPro">
-      <HintPath>C:\Program Files (x86)\Steam\steamapps\common\Sineus Arena\SineusArena_Data\Managed\Unity.TextMeshPro.dll</HintPath>
-      <Private>false</Private>
-    </Reference>
-
-    <!-- Netcode for GameObjects -->
-    <Reference Include="Unity.Netcode.Runtime">
-      <HintPath>C:\Program Files (x86)\Steam\steamapps\common\Sineus Arena\SineusArena_Data\Managed\Unity.Netcode.Runtime.dll</HintPath>
-      <Private>false</Private>
-    </Reference>
+    <!-- Unity Interop Modules -->
+    <Reference Include="UnityEngine" HintPath="$(BepInInterop)\UnityEngine.dll" Private="false" />
+    <Reference Include="UnityEngine.CoreModule" HintPath="$(BepInInterop)\UnityEngine.CoreModule.dll" Private="false" />
+    <Reference Include="UnityEngine.UI" HintPath="$(BepInInterop)\UnityEngine.UI.dll" Private="false" />
+    <Reference Include="UnityEngine.UIModule" HintPath="$(BepInInterop)\UnityEngine.UIModule.dll" Private="false" />
+    <Reference Include="UnityEngine.TextRenderingModule" HintPath="$(BepInInterop)\UnityEngine.TextRenderingModule.dll" Private="false" />
+    <Reference Include="UnityEngine.IMGUIModule" HintPath="$(BepInInterop)\UnityEngine.IMGUIModule.dll" Private="false" />
+    <Reference Include="UnityEngine.TerrainModule" HintPath="$(BepInInterop)\UnityEngine.TerrainModule.dll" Private="false" />
   </ItemGroup>
-
 </Project>

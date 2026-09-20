@@ -66,7 +66,7 @@ namespace PowerupMinimap
                 ClassInjector.RegisterTypeInIl2Cpp<MinimapBlipOverlay>();
 
                 _harmony = new Harmony(MyPluginInfo.PLUGIN_GUID);
-                _harmony.PatchAll(typeof(CollectiblePatches));
+                _harmony.PatchAll(typeof(PowerupMinimapPlugin).Assembly);
 
                 // Instantiate persistent overlay GameObject
                 var go = new GameObject("PowerupMinimapOverlay");

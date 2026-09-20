@@ -55,9 +55,14 @@ namespace PowerupMinimap
         // ── Cached stable values (refreshed periodically) ───────────────────
         private float _worldMinX, _worldMinZ, _worldMaxX, _worldMaxZ;
         private bool  _boundsValid;
+        private bool  _loggedBounds;
         private bool  _isCircular;
         private float _boundsRefreshTimer;
         private const float BoundsRefreshInterval = 1.0f;
+
+        // ── Periodic scan timer for unhooked/pre-existing items ───────────────
+        private float _scanTimer;
+        private const float ScanInterval = 1.5f;
 
         // ── Per-frame draw list (reused, zero heap alloc) ─────────────────────
         private readonly List<(Vector3 world, PickupCategory cat)> _drawList = new(64);
@@ -125,16 +130,16 @@ namespace PowerupMinimap
 
         private void OnSceneLoaded(Scene scene, LoadSceneMode mode)
         {
-            // Reset controller and bounds so new scene's minimap is acquired
+            PowerupMinimapPlugin.Log?.LogInfo($"[PowerupMinimap] Scene loaded: {scene.name}");
             _minimapController = null;
             _mapImageRT = null;
             _maskRT = null;
             _canvas = null;
             _canvasCam = null;
             _boundsValid = false;
+            _loggedBounds = false;
             _boundsRefreshTimer = BoundsRefreshInterval;
 
-            // Clear stale pickups from previous scene
             lock (_lock)
             {
                 _pickups.Clear();
@@ -151,8 +156,16 @@ namespace PowerupMinimap
             float ps = PowerupMinimapPlugin.PulseSpeed.Value;
             if (ps > 0f) _pulsePhase = (_pulsePhase + dt * ps * Mathf.PI * 2f) % (Mathf.PI * 2f);
 
-            // Re-acquire minimap controller if needed
+            // Re-acquire minimap controller and rects
             RefreshMinimapRef();
+
+            // Periodic scan for existing/dropped items in scene
+            _scanTimer += dt;
+            if (_scanTimer >= ScanInterval)
+            {
+                _scanTimer = 0f;
+                ScanExistingCollectibles();
+            }
 
             // Throttled stale-entry prune
             _pruneTimer += dt;
@@ -177,11 +190,37 @@ namespace PowerupMinimap
                 _boundsRefreshTimer = 0f;
                 _boundsValid = TryGetWorldBounds(out _worldMinX, out _worldMinZ, out _worldMaxX, out _worldMaxZ);
 
+                if (_boundsValid && !_loggedBounds)
+                {
+                    _loggedBounds = true;
+                    PowerupMinimapPlugin.Log?.LogInfo($"[PowerupMinimap] Map bounds confirmed: min=({_worldMinX:F1}, {_worldMinZ:F1}) max=({_worldMaxX:F1}, {_worldMaxZ:F1})");
+                }
+
                 if (_minimapController != null)
                 {
                     _isCircular = _minimapController.circularMask;
                 }
             }
+        }
+
+        private void ScanExistingCollectibles()
+        {
+            try
+            {
+                var items = UnityEngine.Object.FindObjectsByType<CollectibleItemBase>(FindObjectsInactive.Exclude, FindObjectsSortMode.None);
+                if (items != null && items.Length > 0)
+                {
+                    for (int i = 0; i < items.Length; i++)
+                    {
+                        var item = items[i];
+                        if (item != null && item.gameObject != null)
+                        {
+                            CollectiblePatches.TryRegister(item);
+                        }
+                    }
+                }
+            }
+            catch { }
         }
 
         // ─────────────────────────────────────────────────────────────────────
@@ -289,18 +328,29 @@ namespace PowerupMinimap
         {
             if (_minimapController == null)
             {
-                _minimapController = UnityEngine.Object.FindAnyObjectByType<MinimapController>();
+                _minimapController = UnityEngine.Object.FindAnyObjectByType<MinimapController>(FindObjectsInactive.Include);
                 if (_minimapController == null) return;
 
-                _mapImageRT = _minimapController.mapImageRect;
-                _maskRT     = _minimapController.maskRect;
+                PowerupMinimapPlugin.Log?.LogInfo("[PowerupMinimap] Found MinimapController in scene!");
+                _mapImageRT = null;
+                _maskRT     = null;
                 _canvas     = null;
                 _canvasCam  = null;
+                _boundsRefreshTimer = BoundsRefreshInterval;
+            }
+
+            if (_mapImageRT == null || _maskRT == null)
+            {
+                _mapImageRT = _minimapController.mapImageRect;
+                _maskRT     = _minimapController.maskRect;
 
                 if (_mapImageRT == null) _mapImageRT = FindMinimapRect(_minimapController);
                 if (_maskRT     == null) _maskRT     = _minimapController.GetComponent<RectTransform>();
 
-                _boundsRefreshTimer = BoundsRefreshInterval;
+                if (_mapImageRT != null && _maskRT != null)
+                {
+                    PowerupMinimapPlugin.Log?.LogInfo($"[PowerupMinimap] Acquired mapImageRect ({_mapImageRT.name}) and maskRect ({_maskRT.name})");
+                }
             }
 
             if (_canvas == null && _mapImageRT != null)
@@ -339,7 +389,7 @@ namespace PowerupMinimap
             {
                 Vector2 mn = _minimapController._minWorld;
                 Vector2 mx = _minimapController._maxWorld;
-                if (Mathf.Abs(mx.x - mn.x) > 1f)
+                if (Mathf.Abs(mx.x - mn.x) > 1f && Mathf.Abs(mx.y - mn.y) > 1f)
                 {
                     minX = mn.x; minZ = mn.y;
                     maxX = mx.x; maxZ = mx.y;

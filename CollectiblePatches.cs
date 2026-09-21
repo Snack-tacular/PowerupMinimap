@@ -86,13 +86,6 @@ namespace PowerupMinimap
             public static void Postfix(CollectibleItemBase __instance) => TryUnregister(__instance);
         }
 
-        [HarmonyPatch(typeof(CollectibleItemBase), nameof(CollectibleItemBase.OnDestroy))]
-        public static class CollectibleItemBase_OnDestroy_Patch
-        {
-            [HarmonyPostfix]
-            public static void Postfix(CollectibleItemBase __instance) => TryUnregister(__instance);
-        }
-
         // ── Helpers ──────────────────────────────────────────────────────────
 
         public static void TryRegister(CollectibleItemBase item)

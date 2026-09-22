@@ -51,8 +51,6 @@ namespace PowerupMinimap
         public static ConfigEntry<bool>  ShowChest        { get; private set; } = null!;
         public static ConfigEntry<bool>  ShowGeneric      { get; private set; } = null!;
 
-        private Harmony? _harmony;
-
         public override void Load()
         {
             Instance = this;
@@ -64,9 +62,6 @@ namespace PowerupMinimap
             {
                 // Register custom MonoBehaviour with IL2CPP runtime
                 ClassInjector.RegisterTypeInIl2Cpp<MinimapBlipOverlay>();
-
-                _harmony = new Harmony(MyPluginInfo.PLUGIN_GUID);
-                _harmony.PatchAll(typeof(PowerupMinimapPlugin).Assembly);
 
                 // Instantiate persistent overlay GameObject
                 var go = new GameObject("PowerupMinimapOverlay");
@@ -83,7 +78,6 @@ namespace PowerupMinimap
 
         public override bool Unload()
         {
-            _harmony?.UnpatchSelf();
             return base.Unload();
         }
 

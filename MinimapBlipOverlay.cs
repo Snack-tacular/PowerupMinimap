@@ -60,9 +60,9 @@ namespace PowerupMinimap
         private float _boundsRefreshTimer;
         private const float BoundsRefreshInterval = 1.0f;
 
-        // ── Periodic scan timer for unhooked/pre-existing items ───────────────
+        // ── Periodic scan timer for collectibles ─────────────────────────────
         private float _scanTimer;
-        private const float ScanInterval = 1.5f;
+        private const float ScanInterval = 0.2f;
 
         // ── Per-frame draw list (reused, zero heap alloc) ─────────────────────
         private readonly List<(Vector3 world, PickupCategory cat)> _drawList = new(64);
@@ -78,7 +78,7 @@ namespace PowerupMinimap
 
         // ── Stale-entry pruning throttle ──────────────────────────────────────
         private float _pruneTimer;
-        private const float PruneInterval = 2.0f;
+        private const float PruneInterval = 0.5f;
         private readonly List<int> _removeBuffer = new(8);
 
         // ── Reusable corner buffer for GUIRectOf ──────────────────────────────
@@ -177,7 +177,8 @@ namespace PowerupMinimap
                     _removeBuffer.Clear();
                     foreach (var kv in _pickups)
                     {
-                        if (kv.Value.Transform == null) _removeBuffer.Add(kv.Key);
+                        if (kv.Value.Transform == null || !kv.Value.Transform.gameObject.activeInHierarchy)
+                            _removeBuffer.Add(kv.Key);
                     }
                     foreach (var id in _removeBuffer) _pickups.Remove(id);
                 }
@@ -213,7 +214,7 @@ namespace PowerupMinimap
                     for (int i = 0; i < items.Length; i++)
                     {
                         var item = items[i];
-                        if (item != null && item.gameObject != null)
+                        if (item != null && item.gameObject != null && !item.collected && !item.IsCollected)
                         {
                             CollectiblePatches.TryRegister(item);
                         }
@@ -275,7 +276,7 @@ namespace PowerupMinimap
             {
                 foreach (var kv in _pickups)
                 {
-                    if (kv.Value.Transform == null) continue;
+                    if (kv.Value.Transform == null || !kv.Value.Transform.gameObject.activeInHierarchy) continue;
                     _drawList.Add((kv.Value.Transform.position, kv.Value.Category));
                 }
             }
